@@ -10,8 +10,6 @@ use tokio::{
     process::{Child, Command as AsyncCommand},
 };
 
-use std::num::ParseIntError;
-
 #[derive(Error, Debug)]
 enum LspError {
     #[error("IO error: {0}")]
@@ -21,7 +19,7 @@ enum LspError {
     #[error("LSP protocol error: {0}")]
     Protocol(String),
     #[error("Parse error: {0}")]
-    ParseInt(#[from] ParseIntError),
+    ParseInt(#[from] std::num::ParseIntError),
 }
 
 struct LspConnection {
@@ -96,12 +94,7 @@ impl LspConnection {
             }
 
             if line.starts_with("Content-Length:") {
-                content_length = Some(
-                    line[16..]
-                        .trim()
-                        .parse::<usize>()
-                        .map_err(|_| LspError::Protocol("Invalid Content-Length".into()))?,
-                );
+                content_length = Some(line[16..].trim().parse::<usize>()?);
             } else if line == "\r\n" {
                 break;
             }
@@ -113,26 +106,7 @@ impl LspConnection {
         let mut content = vec![0; content_length];
         reader.read_exact(&mut content).await?;
 
-        serde_json::from_slice(&content).map_err(Into::into)
-    }
-
-    async fn handle_vim_command(&mut self, command: &str) -> Result<(), LspError> {
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.is_empty() {
-            return Ok(());
-        }
-
-        match parts[0] {
-            "DEFINITION" if parts.len() == 4 => {
-                self.goto_definition(parts[1], parts[2], parts[3]).await
-            }
-            "HOVER" if parts.len() == 3 => self.hover(parts[1], parts[2], parts[3]).await,
-            "COMPLETION" if parts.len() == 3 => self.completion(parts[1], parts[2], parts[3]).await,
-            _ => {
-                error!("Unknown command: {}", command);
-                Ok(())
-            }
-        }
+        Ok(serde_json::from_slice(&content)?)
     }
 
     async fn goto_definition(&mut self, uri: &str, line: &str, col: &str) -> Result<(), LspError> {
@@ -157,52 +131,6 @@ impl LspConnection {
         println!("DEFINITION_RESPONSE: {}", response);
         Ok(())
     }
-
-    async fn hover(&mut self, uri: &str, line: &str, col: &str) -> Result<(), LspError> {
-        let line_num = line.parse::<u32>()?;
-        let col_num = col.parse::<u32>()?;
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "textDocument/hover",
-            "params": {
-                "textDocument": { "uri": uri },
-                "position": {
-                    "line": line_num,
-                    "character": col_num,
-                }
-            }
-        });
-
-        self.send_message(&request.to_string()).await?;
-        let response = self.read_response().await?;
-        println!("HOVER_RESPONSE: {}", response);
-        Ok(())
-    }
-
-    async fn completion(&mut self, uri: &str, line: &str, col: &str) -> Result<(), LspError> {
-        let line_num = line.parse::<u32>()?;
-        let col_num = col.parse::<u32>()?;
-
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "textDocument/completion",
-            "params": {
-                "textDocument": { "uri": uri },
-                "position": {
-                    "line": line_num,
-                    "character": col_num,
-                }
-            }
-        });
-
-        self.send_message(&request.to_string()).await?;
-        let response = self.read_response().await?;
-        println!("COMPLETION_RESPONSE: {}", response);
-        Ok(())
-    }
 }
 
 async fn run_lsp_bridge() -> Result<(), LspError> {
@@ -214,7 +142,12 @@ async fn run_lsp_bridge() -> Result<(), LspError> {
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line?;
-        lsp.handle_vim_command(&line).await?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+
+        if parts.len() >= 4 && parts[0] == "DEFINITION" {
+            lsp.goto_definition(parts[1], parts[2], parts[3]).await?;
+        }
+        // Add more command handlers as needed...
     }
 
     Ok(())
